@@ -58,24 +58,26 @@ for ticker in etfs:
     df.index = pd.to_datetime(df.index)
     data = df['Close'].values.reshape(-1, 1)
 
-    # Normalize the data
-    scaler = MinMaxScaler(feature_range=(0, 1))
-    scaled_data = scaler.fit_transform(data)
-
     # Get unique years
     years = df.index.year.unique()
 
     for year in years:
-        year_data = scaled_data[df.index.year == year]
+        # Filter data to include only data up to and including this year (cumulative)
+        year_mask = df.index.year <= year
+        year_data = data[year_mask]
         
         for seq_length in lookback_periods:
+            # Check if we have enough data for this sequence length
+            if len(year_data) < seq_length + 2:
+                continue
+                
+            # Create sequences from year-specific RAW data (before scaling)
             X, y = create_sequences(year_data, seq_length)
             
             if len(X) < 2:  # Skip if not enough data
                 continue
-        for seq_length in lookback_periods:
-            X, y = create_sequences(scaled_data, seq_length)
-            # Split data into train and test sets
+            
+            # Split data into train and test sets (chronologically)
             samples = X.shape[0]
             X_train, X_test = X[:int(samples * 0.5)], X[int(samples * 0.5):]
             y_train, y_test = y[:int(samples * 0.5)], y[int(samples * 0.5):]
@@ -83,8 +85,26 @@ for ticker in etfs:
             X_val, X_test = X_test[:int(samples * 0.5)], X_test[int(samples * 0.5):]
             y_val, y_test = y_test[:int(samples * 0.5)], y_test[int(samples * 0.5):]
             
-            X_train = np.reshape(X_train, (X_train.shape[0], X_train.shape[1], 1))
-            X_test = np.reshape(X_test, (X_test.shape[0], X_test.shape[1], 1))
+            # Fit scaler ONLY on training data (to avoid look-ahead bias)
+            scaler = MinMaxScaler(feature_range=(0, 1))
+            # Reshape for scaling: flatten sequences, scale, then reshape back
+            n_train, seq_len = X_train.shape[0], X_train.shape[1]
+            X_train_reshaped = X_train.reshape(-1, 1)
+            scaler.fit(X_train_reshaped)
+            X_train_scaled = scaler.transform(X_train_reshaped).reshape(n_train, seq_len, 1)
+            
+            # Transform validation and test sets using training scaler parameters
+            n_val = X_val.shape[0]
+            X_val_reshaped = X_val.reshape(-1, 1)
+            X_val_scaled = scaler.transform(X_val_reshaped).reshape(n_val, seq_len, 1)
+            
+            n_test = X_test.shape[0]
+            X_test_reshaped = X_test.reshape(-1, 1)
+            X_test_scaled = scaler.transform(X_test_reshaped).reshape(n_test, seq_len, 1)
+            
+            # Use scaled versions
+            X_train = X_train_scaled
+            X_test = X_test_scaled
 
             for model_type in model_types:
                 model_checkpoint = ModelCheckpoint(
@@ -95,7 +115,8 @@ for ticker in etfs:
                 )
                 
                 model = create_model(model_type, seq_length)
-                history = model.fit(X_train, y_train, batch_size=32, epochs=5, validation_split=0.2, 
+                history = model.fit(X_train, y_train, batch_size=32, epochs=5, 
+                                    validation_data=(X_val, y_val), 
                                     callbacks=[model_checkpoint], verbose=0)
                 
                 train_loss = history.history['loss'][-1]
